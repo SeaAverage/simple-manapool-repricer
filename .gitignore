@@ -208,3 +208,6 @@ __marimo__/
 
 # Price update reports
 price_updates_*.json
+
+# Failed batch debug artifacts
+failed_batches/

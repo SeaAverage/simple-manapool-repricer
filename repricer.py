@@ -521,7 +521,6 @@ class SimpleManaPoolPricer:
 
                 status = None
                 text = None
-                resp = getattr(e, "response", None)
                 if resp is not None:
                     try:
                         status = resp.status_code
@@ -593,6 +592,28 @@ class SimpleManaPoolPricer:
     def _print_sample_updates(self, updates: list[dict[str, Any]], limit: int = 20):
         logger.info("Sample price changes (first %d):", min(limit, len(updates)))
         logger.info("")
+        logger.info(
+            "Card".ljust(40) + "Set".ljust(6) + "Current".rjust(10) + "New".rjust(10) + "Change".rjust(10)
+        )
+        logger.info("-" * 80)
+
+        for update in updates[:limit]:
+            name = update["_name"][:38]
+            set_code = update["_set"]
+            current = update["_current_price"]
+            new = update["_new_price"]
+            change = new - current
+            change_pct = (change / current * 100) if current > 0 else 0
+
+            logger.info(
+                f"{name:<40} {set_code:<6} ${current:>9.2f} ${new:>9.2f} "
+                f"{change:+9.2f} ({change_pct:+.1f}%)"
+            )
+
+        if len(updates) > limit:
+            logger.info(f"... and {len(updates) - limit:,} more")
+
+        logger.info("")
 
     def _save_failed_batch(
         self,
@@ -607,15 +628,16 @@ class SimpleManaPoolPricer:
         Save the exact batch payload and a small metadata file when a batch fails.
         This creates a 'failed_batches' folder next to the script and writes:
           - failed_batch_{timestamp}_{batch_num}.json  (payload)
-          - failed_batch_{timestamp}_{batch_num}.meta  (metadata with status / error)
+          - failed_batch_{timestamp}_{batch_num}.meta.json  (metadata with status / error)
         """
         try:
             failed_dir = Path(__file__).parent / "failed_batches"
             failed_dir.mkdir(exist_ok=True)
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            now = datetime.now()
+            timestamp = now.strftime("%Y%m%d_%H%M%S")
             payload_file = failed_dir / f"failed_batch_{timestamp}_b{batch_num}_of_{num_batches}.json"
-            meta_file = failed_dir / f"failed_batch_{timestamp}_b{batch_num}_of_{num_batches}.meta"
+            meta_file = failed_dir / f"failed_batch_{timestamp}_b{batch_num}_of_{num_batches}.meta.json"
 
             # Write payload
             with open(payload_file, "w", encoding="utf-8") as f:
@@ -623,7 +645,7 @@ class SimpleManaPoolPricer:
 
             # Write metadata
             meta = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now.isoformat(),
                 "batch_num": batch_num,
                 "num_batches": num_batches,
                 "payload_file": str(payload_file.name),
