@@ -512,7 +512,29 @@ class SimpleManaPoolPricer:
                 http_response.raise_for_status()
                 logger.info(f"  Batch {batch_num}/{num_batches}: Success!")
             except requests.exceptions.RequestException as e:
+                # Try to persist the exact batch payload and some metadata for debugging
+                try:
+                    resp = getattr(e, "response", None)
+                    self._save_failed_batch(batch, batch_num, num_batches, response=resp, error=e)
+                except Exception as save_err:
+                    logger.error(f"  Failed to save failed batch payload: {save_err}")
+
+                status = None
+                text = None
+                resp = getattr(e, "response", None)
+                if resp is not None:
+                    try:
+                        status = resp.status_code
+                        text = resp.text
+                    except Exception:
+                        pass
+
                 logger.error(f"  Batch {batch_num}/{num_batches}: Failed - {e}")
+                if status:
+                    logger.error(f"    HTTP status: {status}")
+                if text:
+                    # don't flood the logs; trim the response body
+                    logger.error(f"    Response body: {text[:1000]}")
                 return False
 
         logger.info("")
@@ -571,28 +593,78 @@ class SimpleManaPoolPricer:
     def _print_sample_updates(self, updates: list[dict[str, Any]], limit: int = 20):
         logger.info("Sample price changes (first %d):", min(limit, len(updates)))
         logger.info("")
-        logger.info(
-            f"{'Card':<40} {'Set':<6} {'Current':>10} {'New':>10} {'Change':>10}"
-        )
-        logger.info("-" * 80)
 
-        for update in updates[:limit]:
-            name = update["_name"][:38]
-            set_code = update["_set"]
-            current = update["_current_price"]
-            new = update["_new_price"]
-            change = new - current
-            change_pct = (change / current * 100) if current > 0 else 0
+    def _save_failed_batch(
+        self,
+        batch: list[dict[str, Any]],
+        batch_num: int,
+        num_batches: int,
+        response: requests.Response | None = None,
+        error: Exception | None = None,
+        limit: int = 20,
+    ) -> None:
+        """
+        Save the exact batch payload and a small metadata file when a batch fails.
+        This creates a 'failed_batches' folder next to the script and writes:
+          - failed_batch_{timestamp}_{batch_num}.json  (payload)
+          - failed_batch_{timestamp}_{batch_num}.meta  (metadata with status / error)
+        """
+        try:
+            failed_dir = Path(__file__).parent / "failed_batches"
+            failed_dir.mkdir(exist_ok=True)
 
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            payload_file = failed_dir / f"failed_batch_{timestamp}_b{batch_num}_of_{num_batches}.json"
+            meta_file = failed_dir / f"failed_batch_{timestamp}_b{batch_num}_of_{num_batches}.meta"
+
+            # Write payload
+            with open(payload_file, "w", encoding="utf-8") as f:
+                json.dump(batch, f, indent=2, ensure_ascii=False)
+
+            # Write metadata
+            meta = {
+                "timestamp": datetime.now().isoformat(),
+                "batch_num": batch_num,
+                "num_batches": num_batches,
+                "payload_file": str(payload_file.name),
+                "error": repr(error) if error else None,
+            }
+            if response is not None:
+                try:
+                    meta["http_status"] = getattr(response, "status_code", None)
+                    meta["response_text_first_200_chars"] = (response.text[:200] if hasattr(response, "text") else None)
+                except Exception:
+                    # don't let metadata writing fail if response inspection fails
+                    pass
+
+            with open(meta_file, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+
+            logger.error(f"  Saved failed batch payload to: {payload_file}")
+            logger.error(f"  Saved failure metadata to: {meta_file}")
+        except Exception as e:
+            logger.error(f"  Error while saving failed batch files: {e}")
+
+        # Also print a small sample of the failed batch to the log for quick inspection
+        try:
             logger.info(
-                f"{name:<40} {set_code:<6} ${current:>9.2f} ${new:>9.2f} "
-                f"{change:+9.2f} ({change_pct:+.1f}%)"
+                f"{'Scryfall/Product ID':<40} {'Finish':<6} {'Price':>10} {'Qty':>6}"
             )
+            logger.info("-" * 70)
+            for entry in batch[:limit]:
+                sid = entry.get("scryfall_id") or entry.get("product_id") or "-"
+                finish = entry.get("finish_id", "-")
+                price = entry.get("price_cents", 0) / 100.0
+                qty = entry.get("quantity", 0)
+                logger.info(f"{sid:<40} {finish:<6} ${price:>9.2f} {qty:>6}")
 
-        if len(updates) > limit:
-            logger.info(f"... and {len(updates) - limit:,} more")
+            if len(batch) > limit:
+                logger.info(f"... and {len(batch) - limit:,} more")
 
-        logger.info("")
+            logger.info("")
+        except Exception:
+            # best-effort logging; don't let this cause further failures
+            pass
 
     def save_report(self, updates: list[dict[str, Any]]):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
