@@ -2,6 +2,7 @@
 
 import json
 import logging
+from logging import config
 import os
 import sys
 from datetime import datetime
@@ -82,6 +83,7 @@ class SimpleManaPoolPricer:
             sys.exit(1)
 
         pricing_config = config.get("pricing", {})
+        other_config = config.get("other", {})
         self.dry_run = pricing_config.get("dry_run", True)
         self.pricing_strategy = pricing_config.get("strategy", "lp_plus")
         self.lp_floor_percent = pricing_config.get("lp_floor_percent", 100.0)
@@ -90,6 +92,8 @@ class SimpleManaPoolPricer:
         self.price_adjustment_factor = pricing_config.get(
             "price_adjustment_factor", 1.042
         )
+        self.report_enabled = other_config.get("report_enabled", True)
+        self.batch_size = other_config.get("batch_size", 1500)
 
         logger.info("=" * 80)
         logger.info("Simple ManaPool Pricer - Configuration")
@@ -101,6 +105,8 @@ class SimpleManaPoolPricer:
         logger.info(f"LP+ Floor: {self.lp_floor_percent}%")
         logger.info(f"Min Price: ${self.min_price}")
         logger.info(f"Max Reduction: {self.max_reduction_percent}%")
+        logger.info(f"Report Enabled: {self.report_enabled}")
+        logger.info(f"Batch Size: {self.batch_size}")
         logger.info("=" * 80)
         logger.info("")
 
@@ -419,8 +425,10 @@ class SimpleManaPoolPricer:
         if not updates:
             logger.info("[4/4] No updates to apply")
             return True
-
+        # Review all calculated updates, but only apply those with quantity > 0
         logger.info(f"[4/4] Reviewing {len(updates):,} price updates...")
+        updates_to_apply = [u for u in updates if u.get("quantity", 0) > 0]
+        logger.info(f"  Updates with quantity > 0: {len(updates_to_apply):,}")
         logger.info("")
 
         logger.info("=" * 80)
@@ -428,16 +436,17 @@ class SimpleManaPoolPricer:
         logger.info("=" * 80)
         logger.info("")
 
-        self._print_extremes(updates)
+        # Show extremes only for items that will actually be updated
+        self._print_extremes(updates_to_apply)
         logger.info("")
 
-        self._print_sample_updates(updates)
+        self._print_sample_updates(updates_to_apply)
         logger.info("")
 
-        increases = sum(1 for u in updates if u["_new_price"] > u["_current_price"])
-        decreases = sum(1 for u in updates if u["_new_price"] < u["_current_price"])
-        total_current = sum(u["_current_price"] for u in updates)
-        total_new = sum(u["_new_price"] for u in updates)
+        increases = sum(1 for u in updates_to_apply if u["_new_price"] > u["_current_price"])
+        decreases = sum(1 for u in updates_to_apply if u["_new_price"] < u["_current_price"])
+        total_current = sum(u["_current_price"] for u in updates_to_apply)
+        total_new = sum(u["_new_price"] for u in updates_to_apply)
         total_change = total_new - total_current
 
         logger.info("Summary:")
@@ -463,25 +472,17 @@ class SimpleManaPoolPricer:
         )
         logger.info("")
 
-        try:
-            response = (
-                input("Type 'yes' to confirm and apply these changes: ").strip().lower()
-            )
-        except (KeyboardInterrupt, EOFError):
-            logger.info("\nCancelled by user")
-            return False
-
-        if response != "yes":
-            logger.info("")
-            logger.info("Update cancelled - no changes were made")
-            return False
-
         logger.info("")
         logger.info("Applying updates to ManaPool...")
         logger.info("")
 
+        # Only send items that have quantity > 0
+        if not updates_to_apply:
+            logger.info("[4/4] No updates to apply (no items with quantity > 0)")
+            return True
+
         clean_updates = []
-        for update in updates:
+        for update in updates_to_apply:
             clean_updates.append(
                 {
                     "scryfall_id": update["scryfall_id"],
@@ -493,7 +494,7 @@ class SimpleManaPoolPricer:
                 }
             )
 
-        batch_size = 1500
+        batch_size = self.batch_size
         total = len(clean_updates)
         num_batches = (total + batch_size - 1) // batch_size
 
@@ -712,7 +713,7 @@ class SimpleManaPoolPricer:
             updates = self.process_inventory(inventory, price_data)
             success = self.apply_updates(updates)
 
-            if updates:
+            if updates and self.report_enabled:
                 self.save_report(updates)
 
             logger.info("")
